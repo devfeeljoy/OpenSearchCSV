@@ -31,8 +31,6 @@ func HandleRequest(ctx context.Context, s3Event events.S3Event) {
 
 		bucket := record.S3.Bucket.Name
 		key := record.S3.Object.Key
-		//bucket := "burige.314257712735.ap-northeast-2"
-		//key := "NewRank/2023-12-01/buridge_dy_account_daily_data_20231201.avro"
 
 		// S3에서 Avro 파일 가져오기
 		result, err := s3Client.GetObject(&s3.GetObjectInput{
@@ -94,7 +92,6 @@ func HandleRequest(ctx context.Context, s3Event events.S3Event) {
 						rawDatum["dyFansNum"] = dyFansNum
 					}
 				}
-
 				// "fansNum" 필드를 숫자로 변환
 				fansNumStr, ok := rawDatum["fansNum"].(string)
 				if ok {
@@ -153,7 +150,7 @@ func indexBatchToOpenSearch(batchData []interface{}, openSearchURL string) error
 	var buffer bytes.Buffer
 	for _, data := range batchData {
 		metaData := map[string]map[string]string{
-			"index": {"_index": "influencer"},
+			"index": {"_index": "influencers"},
 		}
 		jsonMeta, _ := json.Marshal(metaData)
 		buffer.Write(jsonMeta)
