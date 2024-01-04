@@ -1,167 +1,75 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/linkedin/goavro/v2"
+	"io/ioutil"
 	"net/http"
 	"os"
-	"strconv"
 )
 
-func HandleRequest(ctx context.Context, s3Event events.S3Event) {
-	openSearchURL := os.Getenv("OPENSEARCH_URL")
+func processBatch(records [][]string, headers []string, client *http.Client, req *http.Request) error {
+	var bulkRequestBody bytes.Buffer
 
-	sess, _ := session.NewSession(&aws.Config{
-		Region: aws.String("ap-northeast-2")}, // AWS 리전 설정
-	)
-
-	s3Client := s3.New(sess)
-
-	for _, record := range s3Event.Records {
-
-		bucket := record.S3.Bucket.Name
-		key := record.S3.Object.Key
-
-		// S3에서 Avro 파일 가져오기
-		result, err := s3Client.GetObject(&s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-		})
-		if err != nil {
-			fmt.Printf("Error getting Avro file from S3: %s\n", err)
-			return
-		}
-		bodyReader := bufio.NewReader(result.Body)
-
-		// Avro 파일 읽기 및 처리
-		ocfr, err := goavro.NewOCFReader(bodyReader)
-		if err != nil {
-			fmt.Printf("Error creating OCF reader: %s\n", err)
-			return
-		}
-		// HandleRequest 함수 내에서
-		var batchData []interface{}
-		// Avro 레코드 처리
-		for ocfr.Scan() {
-			avroRecord, err := ocfr.Read()
-			if err != nil {
-				fmt.Println("Error reading datum:", err)
-				continue
-			}
-
-			// 타입 단언을 사용하여 rawDatum을 map[string]interface{} 타입으로 변환
-			rawDatum, ok := avroRecord.(map[string]interface{})
-			if !ok {
-				fmt.Println("Error asserting datum to map[string]interface{}")
-				continue
-			}
-
-			// 필요한 데이터 변환 수행
-			for key, value := range rawDatum {
-
-				if valueMap, ok := value.(map[string]interface{}); ok {
-					if stringValue, ok := valueMap["string"].(string); ok {
-						rawDatum[key] = stringValue
-					}
-				}
-
-				// "age" 필드를 숫자로 변환
-				ageStr, ok := rawDatum["age"].(string)
-				if ok {
-					age, err := strconv.Atoi(ageStr)
-					if err == nil {
-						rawDatum["age"] = age
-					}
-				}
-
-				// "dyFansNum" 필드를 숫자로 변환
-				dyFansNumStr, ok := rawDatum["dyFansNum"].(string)
-				if ok {
-					dyFansNum, err := strconv.Atoi(dyFansNumStr)
-					if err == nil {
-						rawDatum["dyFansNum"] = dyFansNum
-					}
-				}
-				// "fansNum" 필드를 숫자로 변환
-				fansNumStr, ok := rawDatum["fansNum"].(string)
-				if ok {
-					fansNum, err := strconv.Atoi(fansNumStr)
-					if err == nil {
-						rawDatum["fansNum"] = fansNum
-					}
-				}
-
-				// "likeNum" 필드를 숫자로 변환
-				likeNumStr, ok := rawDatum["likeNum"].(string)
-				if ok {
-					likeNum, err := strconv.Atoi(likeNumStr)
-					if err == nil {
-						rawDatum["likeNum"] = likeNum
-					}
-				}
-
-				// "opusNum" 필드를 숫자로 변환
-				opusNumStr, ok := rawDatum["opusNum"].(string)
-				if ok {
-					opusNum, err := strconv.Atoi(opusNumStr)
-					if err == nil {
-						rawDatum["opusNum"] = opusNum
-					}
-				}
-			}
-			batchData = append(batchData, rawDatum)
-
-			// 배치 크기에 도달하거나 마지막 레코드인 경우 색인화
-			if len(batchData) >= 1000 {
-				err = indexBatchToOpenSearch(batchData, openSearchURL)
-				if err != nil {
-					fmt.Printf("Error indexing batch to OpenSearch: %s\n", err)
-				}
-				batchData = nil // 배치 초기화
-			}
-		}
-		if len(batchData) > 0 {
-			err = indexBatchToOpenSearch(batchData, openSearchURL)
-			if err != nil {
-				fmt.Printf("Error indexing batch to OpenSearch: %s\n", err)
-			}
+	for _, record := range records {
+		metaData := map[string]map[string]interface{}{
+			"index": {"_index": "product_categories"},
 		}
 
+		metaJSON, _ := json.Marshal(metaData)
+		bulkRequestBody.Write(metaJSON)
+		bulkRequestBody.WriteByte('\n')
+
+		data := make(map[string]interface{})
+		for i, header := range headers {
+			data[header] = record[i]
+		}
+
+		dataJSON, _ := json.Marshal(data)
+		bulkRequestBody.Write(dataJSON)
+		bulkRequestBody.WriteByte('\n')
 	}
+
+	req.Body = ioutil.NopCloser(&bulkRequestBody)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	responseBody, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println(string(responseBody))
+	return nil
 }
 
-func indexBatchToOpenSearch(batchData []interface{}, openSearchURL string) error {
+func HandleRequest() {
+	openSearchURL := "https://search-buridge-lmwxkhotosmwhumwcno32druge.ap-northeast-2.es.amazonaws.com"
+	username := "buridge"
+	password := "iFuYdanRBc8oPb*.J!i*PPEsK4@xVX"
+	// Lambda 실행 환경에서의 파일 경로
+	filePath := "/Users/joupil/Desktop/highdev/뷰릿지/OpenSearchCSV/hello-world/상품카테고리.csv"
+	file, err := os.Open(filePath)
 
-	// 환경 변수에서 OpenSearch의 사용자 이름과 비밀번호를 읽습니다.
-	username := os.Getenv("OPENSEARCH_USERNAME")
-	password := os.Getenv("OPENSEARCH_PASSWORD")
+	defer file.Close()
 
-	//signer *v4.Signer
-	var buffer bytes.Buffer
-	for _, data := range batchData {
-		metaData := map[string]map[string]string{
-			"index": {"_index": "influencers"},
-		}
-		jsonMeta, _ := json.Marshal(metaData)
-		buffer.Write(jsonMeta)
-		buffer.WriteString("\n")
-
-		jsonData, _ := json.Marshal(data)
-		buffer.Write(jsonData)
-		buffer.WriteString("\n")
+	// CSV Reader 생성
+	reader := csv.NewReader(file)
+	reader.Comma = ',' // 필요에 따라 구분자 변경
+	records, err := reader.ReadAll()
+	if err != nil {
+		panic(err)
 	}
 
-	req, _ := http.NewRequest("POST", openSearchURL+"/_bulk", &buffer)
+	// OpenSearch 색인화를 위한 Bulk API 요청 생성
+	var bulkRequestBody bytes.Buffer
+	headers := records[0] // 첫 번째 행은 헤더
+	client := &http.Client{}
+
+	// OpenSearch에 데이터 색인화
+	req, err := http.NewRequest("POST", openSearchURL+"/_bulk", &bulkRequestBody)
 
 	// ID와 패스워드를 결합하고 Base64로 인코딩합니다.
 	auth := username + ":" + password
@@ -172,20 +80,26 @@ func indexBatchToOpenSearch(batchData []interface{}, openSearchURL string) error
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending bulk request to OpenSearch: %v", err)
-	}
-	defer resp.Body.Close()
+	// 배치 크기 정의
+	batchSize := 50 // 예시 크기
+	for i := 0; i < len(records[1:]); i += batchSize {
+		end := i + batchSize
+		if end > len(records[1:]) {
+			end = len(records[1:])
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("error response from OpenSearch: %v", resp.Status)
+		batch := records[1:][i:end]
+		err := processBatch(batch, headers, client, req)
+		if err != nil {
+			panic(err)
+		}
+
+		//// 선택적으로 요청 간 지연 시간 추가
+		//time.Sleep(1 * time.Second)
 	}
 
-	return nil
 }
 
 func main() {
-	lambda.Start(HandleRequest)
+	HandleRequest()
 }
